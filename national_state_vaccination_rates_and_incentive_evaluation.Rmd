@@ -12,6 +12,8 @@ Studies like [this assessment of the vaccine lottery in Ohio](https://jamanetwor
 
 [This study](https://bmcmedresmethodol.biomedcentral.com/articles/10.1186/s12874-021-01235-8) uses the fable package and gets more into the math.
 
+**Note: This is an experiment to try out a method that I'm not very familiar with. It should not be construed as a reputable or peer-reviewed evaluation of vaccine incentives**
+
 ```{r setup, warning=FALSE, message=FALSE}
 knitr::opts_chunk$set(
   warning = FALSE, 
@@ -36,77 +38,61 @@ library(feasts) # additional tools for forecasting
 
 # Get data
 
-```{r}
-vacc <- read_csv("https://github.com/govex/COVID-19/blob/master/data_tables/vaccine_data/us_data/time_series/people_vaccinated_us_timeline.csv?raw=true")
+## Data source
 
-tabyl(vacc$Province_State)
+Originally used Johns Hopkins cleaned up data, but this only had cumulative doses. Switched to [Our World In Data](https://github.com/owid/covid-19-data/tree/master/public/data/vaccinations/), which downloads from the CDC for US Vaccinations.
+
+This data is nice because vaccination rates per 100 or million are calculated.
+
+```{r}
+#vacc <- read_csv("https://github.com/govex/COVID-19/blob/master/data_tables/vaccine_data/us_data/time_series/people_vaccinated_us_timeline.csv?raw=true")
+
+vacc <- read_csv("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/us_state_vaccinations.csv")
+
+tabyl(vacc$location)
 ```
 
 ## Total vaccinations nationally
 
 ```{r}
-us <- vacc %>%
-  group_by(Date) %>%
-  summarize(across(c(People_Fully_Vaccinated, People_Partially_Vaccinated),
-                   ~sum(.x, na.rm = TRUE))) %>%
-  mutate(Province_State = "National")
-
-us %>%
-  ggplot(aes(x = Date, y = People_Partially_Vaccinated)) +
+vacc %>%
+  filter(location == "United States") %>%
+  ggplot(aes(x = date, y = daily_vaccinations_per_million)) +
     geom_line() +
     scale_y_continuous(labels = scales::comma) +
-    labs(title = "People Partially Vaccinated, United States",
+    labs(title = "Daily Vaccinations per Million, United States",
          y = "") +
     theme_fivethirtyeight()
 ```
 
-## Get population by state
-
-```{r}
-pop <- get_acs(geography = "state",
-               variables = c("population" = "B01003_001")) %>%
-  mutate(FIPS = as.numeric(GEOID))
-```
-
-### what entities don't have fips?
+### Looking at Minnesota's rate
 
 ```{r}
 vacc %>%
-  filter(is.na(FIPS)) %>%
-  distinct(Combined_Key)
-```
-
-### Join by FIPS
-
-```{r}
-vacc2 <- vacc %>%
-  left_join(pop %>% select(FIPS, pop = estimate), by = "FIPS") %>%
-  filter(!is.na(FIPS)) %>%
-  bind_rows(us) %>% # add nation
-  mutate(pop = if_else(Province_State == "National", 328239523, pop)) %>% # add US pop manually
-  mutate(full_vacc_rate = People_Fully_Vaccinated / (pop / 100000),
-         part_vacc_rate = People_Partially_Vaccinated / (pop / 100000))
-    # calculate rates of vaccinations per 100,000 people
-
-vacc2 %>%
-  ggplot(aes(x = Date, y = full_vacc_rate, group = Province_State, 
-             color = Province_State)) +
+  ggplot(aes(x = date, y = daily_vaccinations_per_million, group = location, 
+             color = location)) +
     geom_line() +
-    gghighlight(Province_State %in% c("National", "Minnesota", "Michigan",
-                                      "Wisconsin", "New York", "Alabama")) +
-    labs(title = "Complete vaccinations per 100k people",
-         y = "Vaccinations per 100,000 residents") +
+    gghighlight(location %in% c("United States", "Minnesota", "Michigan",
+                                "Wisconsin", "New York", "Alabama")) +
+    labs(title = "Daily Vaccinations per Million Residents",
+         y = "Vaccinations per million residents") +
     scale_y_continuous(labels = scales::comma) +
     theme_fivethirtyeight()
 
-vacc2 %>%
-  filter(Province_State %in% c("National", "Minnesota"),
-         Date > '2021-08-01') %>%
-  ggplot(aes(x = Date, y = full_vacc_rate, group = Province_State, 
-             color = Province_State)) +
+vacc %>%
+  filter(location %in% c("United States", "Minnesota"),
+         date > '2021-07-01') %>%
+  ggplot(aes(x = date, y = daily_vaccinations_per_million, group = location, 
+             color = location)) +
     geom_line() +
-    theme_fivethirtyeight()
+    theme_fivethirtyeight() +
+    labs(title = "Daily Vaccinations per Million Residents",
+         color = "")
 ```
+
+Not sure why there is a dip on August 15 and another one a week later. Is this based on MN not reporting vaccinations on weekends? I would exclude the Sunday of August 15 just in case.
+
+## Research Question
 
 **Research Question: Was incentives introduced in August associated with a relative increase in vaccination rates in MN (compared to the US)?**
 
@@ -121,37 +107,36 @@ Using [this article](https://www.academicpedsjnl.net/article/S1876-2859(13)00210
 Create a dataframe to resemble that in Table 2 in the article. This has the coefficient necessary to do a ITS analysis.
 
 ```{r}
-its <- vacc2 %>%
-  filter(Province_State %in% c("National", "Minnesota"),
-         Date > '2021-07-01',
-         Date <= '2021-08-15') %>%
-  select(Province_State, Date, part_vacc_rate) %>%
-  pivot_wider(names_from = Province_State, values_from = part_vacc_rate) %>%
-  arrange(Date) %>%
-  mutate(diff = Minnesota - National,
-         prog = if_else(Date >= '2021-07-30' & Date <= '2021-08-15', 1, 0),
+its <- vacc %>%
+  filter(location %in% c("United States", "Minnesota"),
+         date > '2021-07-14',
+         date <= '2021-08-14') %>%
+  select(location, date, daily_vaccinations_per_million) %>%
+  pivot_wider(names_from = location, values_from = daily_vaccinations_per_million) %>%
+  arrange(date) %>%
+  mutate(diff = Minnesota - `United States`,
+         prog = if_else(date >= '2021-07-30' & date <= '2021-08-15', 1, 0),
          time = row_number(),
          time_after = cumsum(prog))
 
 its_ts <- its %>%
-  as_tsibble(key = NULL, index = Date)
+  as_tsibble(key = NULL, index = date)
 ```
 
 
 ```{r}
 its %>%
-  ggplot(aes(x = Date)) +
+  ggplot(aes(x = date)) +
     geom_point(aes(y = Minnesota), color = "red", shape = 1) +
     geom_smooth(aes(y = Minnesota, group = prog, color = factor(prog)), method = "lm",
                 se = FALSE) +
-    geom_point(aes(y = National), color = "blue", shape = 1) +
-    geom_smooth(aes(y = National, group = prog, color = factor(prog)), method = "lm",
+    geom_point(aes(y = `United States`), color = "blue", shape = 1) +
+    geom_smooth(aes(y = `United States`, group = prog, color = factor(prog)), method = "lm",
                 se = FALSE) +
     labs(title = "Vaccination rates pre/post MN incentive",
-         subtitle = "Minnesota (blue) compared to US (red)", y = "At least one vaccine per 100,000 people",
+         subtitle = "Minnesota (red) compared to US (blue)", y = "At least one vaccine per 100,000 people",
          color = "Program") +
     scale_y_continuous(labels = scales::comma) +
-    ylim(0, 10000) +
     theme_fivethirtyeight()
 ```
 
@@ -159,7 +144,7 @@ its %>%
 ```{r}
 its %>%
   mutate(Program = if_else(prog == 1, "Gift Cards", "No Gift Cards")) %>%
-  ggplot(aes(x = Date, y = diff)) +
+  ggplot(aes(x = date, y = diff)) +
     geom_point() +
     geom_smooth(aes(group = Program, color = factor(Program)), method = "lm",
                 se = FALSE) +
@@ -204,7 +189,7 @@ results2
 
 Time controls for the trend, is not important but shows that rates were trending down to a stat sig degree
 
-Time after is not significant, there was no sig trending down during the program
+Time after is significant, there was a stat sig trend up during the program
 
 Program here is not significant, so there was no evidence the program had an impact in vaccination rates compared to the US.
 
@@ -212,9 +197,11 @@ Program here is not significant, so there was no evidence the program had an imp
 
 Comparing MN to the US would be problematic if the US had certain regions with different trends that made a national trend that was not very comparable. For example, the East Coast has lower trends because more people are vaccinated, and there is increasing vaccines in the South, since less people are vaccination, and the result of these two trends is a generally stable trend. In other words, what is a good comparison to Minnesota?
 
+Consider comparing Minnesota with other states with similar vaccination rates (percent of population vaccinated to date).
+
 ### Vaccination rates by region
 
-We can forecast for MN and US. I'm not sure what the value of including the forecast for US is. I think a counterfactual should be based on the comparison - here MN and US are being calculated separately but using the same model?
+Compare regions to see if there are different rates. Haven't done this yet.
 
 ```{r}
 
@@ -228,9 +215,9 @@ Let's create a tidy tsibble, model both MN and USA, and compare the predictions 
 
 ```{r}
 its_tidy_ts <- its %>%
-  pivot_longer(Minnesota:National, names_to = "region", values_to = "vacc_rate") %>%
-  select(Date, prog, region, vacc_rate) %>%
-  as_tsibble(key = region, index = Date)
+  pivot_longer(Minnesota:`United States`, names_to = "region", values_to = "vacc_rate") %>%
+  select(date, prog, region, vacc_rate) %>%
+  as_tsibble(key = region, index = date)
 
 train_model = its_tidy_ts %>%
   filter(prog == 0) %>%
@@ -254,12 +241,12 @@ its_fc %>%
 mn_fc <- its_fc %>% 
   filter(region == "Minnesota") %>% 
   as_tibble() %>%
-  full_join(its %>% select(Date, Minnesota, National, prog), by = "Date") %>%
-  select(Date, `Forecasted Minnesota` = .mean, `Actual Minnesota` = Minnesota, National, prog) %>%
-  pivot_longer(`Forecasted Minnesota`:`National`)
+  full_join(its %>% select(date, Minnesota, `United States`, prog), by = "date") %>%
+  select(date, `Forecasted Minnesota` = .mean, `Actual Minnesota` = Minnesota, `United States`, prog) %>%
+  pivot_longer(`Forecasted Minnesota`:`United States`)
 
 mn_fc %>%
-  ggplot(aes(x = Date, y = value, group = name, color = name)) +
+  ggplot(aes(x = date, y = value, group = name, color = name)) +
     geom_point(shape = 1) +
     geom_smooth(data = mn_fc %>% filter(prog == 1), method = "lm", se = FALSE) +
     geom_smooth(data = mn_fc %>% filter(prog == 0), method = "lm", se = FALSE) +
@@ -268,5 +255,4 @@ mn_fc %>%
     labs(title = "$100 Incentive and Impact on Vaccine Rates",
          subtitle = "Forecasted rates based on ARIMA model", color = "",
          caption = "@rbamattre | Source: Johns Hopkins")
-  
 ```
