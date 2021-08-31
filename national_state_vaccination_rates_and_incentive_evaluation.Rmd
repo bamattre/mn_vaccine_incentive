@@ -15,12 +15,11 @@ Studies like [this assessment of the vaccine lottery in Ohio](https://jamanetwor
 **Note: This is an experiment to try out a method that I'm not very familiar with. It should not be construed as a reputable or peer-reviewed evaluation of vaccine incentives**
 
 ```{r setup, warning=FALSE, message=FALSE}
-knitr::opts_chunk$set(
-  warning = FALSE, 
-  message = FALSE)
-
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
 # load
-library(tidycensus); census_api_key("0c5d9fddc67544f23d3fa524660c9d81d4be2c90")
+library(tidycensus)
+#Sys.setenv(CENSUS_KEY = "[census api key here]")
+census_api_key(Sys.getenv("CENSUS_KEY"))
 
 # wrangle
 library(tidyverse) # of course
@@ -49,7 +48,7 @@ This data is nice because vaccination rates per 100 or million are calculated.
 
 vacc <- read_csv("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/vaccinations/us_state_vaccinations.csv")
 
-tabyl(vacc$location)
+unique(vacc$location)
 ```
 
 ## Total vaccinations nationally
@@ -73,10 +72,11 @@ vacc %>%
              color = location)) +
     geom_line() +
     gghighlight(location %in% c("United States", "Minnesota", "Michigan",
-                                "Wisconsin", "New York", "Alabama")) +
+                                "Wisconsin", "New York", "Alabama", "Vermont")) +
     labs(title = "Daily Vaccinations per Million Residents",
          y = "Vaccinations per million residents") +
     scale_y_continuous(labels = scales::comma) +
+    ylim(0, 15000) +
     theme_fivethirtyeight()
 
 vacc %>%
@@ -96,7 +96,7 @@ Not sure why there is a dip on August 15 and another one a week later. Is this b
 
 **Research Question: Was incentives introduced in August associated with a relative increase in vaccination rates in MN (compared to the US)?**
 
-Incentives for shots done 7/30 - 8/15
+Incentives for shots done 7/30 - 8/22 (was extended an extra week)
 
 Trying out an Interrupted Time Series (ITS) Approach
 
@@ -110,12 +110,12 @@ Create a dataframe to resemble that in Table 2 in the article. This has the coef
 its <- vacc %>%
   filter(location %in% c("United States", "Minnesota"),
          date > '2021-07-14',
-         date <= '2021-08-14') %>%
+         date <= '2021-08-22') %>%
   select(location, date, daily_vaccinations_per_million) %>%
   pivot_wider(names_from = location, values_from = daily_vaccinations_per_million) %>%
   arrange(date) %>%
   mutate(diff = Minnesota - `United States`,
-         prog = if_else(date >= '2021-07-30' & date <= '2021-08-15', 1, 0),
+         prog = if_else(date >= '2021-07-30' & date <= '2021-08-22', 1, 0),
          time = row_number(),
          time_after = cumsum(prog))
 
@@ -155,8 +155,22 @@ its %>%
     theme_fivethirtyeight()
 ```
 
+## LM Model
 
-## Create model
+Fit a linear regression model, without considering autocorrelation or seasonality (that's modeled by ARIMA).
+
+The assumption of this is that errors are not correlated - but it's a time series so they are.
+
+```{r}
+its_tb <- its_ts %>% as_tibble
+
+lm <- lm(diff ~ time + prog + time_after, data = its_tb)
+
+summary(lm)
+```
+
+
+## ARIMA Model
 
 Fit model using regression equation:
 
@@ -187,52 +201,53 @@ results2 <- results %>%
 results2
 ```
 
-Time controls for the trend, is not important but shows that rates were trending down to a stat sig degree
+Time controls for the trend, is not important but shows that rates were not trending overall to a stat sig degree
 
-Time after is significant, there was a stat sig trend up during the program
+Time after is not significant, there was not a stat sig trend up during the program
 
 Program here is not significant, so there was no evidence the program had an impact in vaccination rates compared to the US.
 
-## Confounding variables
-
-Comparing MN to the US would be problematic if the US had certain regions with different trends that made a national trend that was not very comparable. For example, the East Coast has lower trends because more people are vaccinated, and there is increasing vaccines in the South, since less people are vaccination, and the result of these two trends is a generally stable trend. In other words, what is a good comparison to Minnesota?
-
-Consider comparing Minnesota with other states with similar vaccination rates (percent of population vaccinated to date).
-
-### Vaccination rates by region
-
-Compare regions to see if there are different rates. Haven't done this yet.
-
-```{r}
-
-```
-
-## Counterfactual plot
+### Counterfactual plot
 
 How to plot the counterfactual? i.e. where MN would have expected vaccine rates if following the trend of the US? This may not be very empirical, but it should provide an engaging plot to see how rates differed over time.
 
 Let's create a tidy tsibble, model both MN and USA, and compare the predictions versus the actual while the incentive was in place.
 
+Should we use all available data to forecast, not just from July?
+
 ```{r}
-its_tidy_ts <- its %>%
+its_all <- vacc %>%
+  filter(location %in% c("United States", "Minnesota"),
+         #date > '2021-07-14',
+         date <= '2021-08-22') %>%
+  select(location, date, daily_vaccinations_per_million) %>%
+  pivot_wider(names_from = location, values_from = daily_vaccinations_per_million) %>%
+  arrange(date) %>%
+  mutate(diff = Minnesota - `United States`,
+         prog = if_else(date >= '2021-07-30' & date <= '2021-08-22', 1, 0),
+         time = row_number(),
+         time_after = cumsum(prog))
+
+its_all_ts <- its_all %>%
   pivot_longer(Minnesota:`United States`, names_to = "region", values_to = "vacc_rate") %>%
   select(date, prog, region, vacc_rate) %>%
   as_tsibble(key = region, index = date)
 
-train_model = its_tidy_ts %>%
+train_model = its_all_ts %>%
   filter(prog == 0) %>%
   model(ARIMA(vacc_rate))
 
 train_model
 
 its_fc <- train_model %>%
-  forecast(h = 17)
+  forecast(h = 24)
 
 its_fc %>%
   autoplot(
-    its_tidy_ts
+    its_all_ts %>% filter_index("2021-07-15" ~ .)
   ) +
-    theme_fivethirtyeight()
+    theme_fivethirtyeight() +
+    ylim(0, 2500)
 ```
 
 ```{r}
@@ -255,4 +270,95 @@ mn_fc %>%
     labs(title = "$100 Incentive and Impact on Vaccine Rates",
          subtitle = "Forecasted rates based on ARIMA model", color = "",
          caption = "@rbamattre | Source: Johns Hopkins")
+```
+
+## ARIMA - No counterfactual
+
+Based on Schaffer et al., we could do an Interrupted Time Series just with MN (where the counterfactual is the predicted rates).
+
+```{r}
+model2 <- its_ts %>%
+  model(ARIMA(Minnesota ~ time + prog + time_after))
+
+report(model2)
+```
+
+### Assess residuals
+
+```{r}
+model2 %>%
+  gg_tsresiduals()
+```
+
+### See results
+
+```{r}
+results2 <- model2[[1]][[1]]$fit$par
+
+results3 <- results2 %>%
+  mutate(p.value = if_else(p.value < .001, "<0.001", as.character(round(p.value, 3))))
+
+results3
+```
+
+Here there is still no significant impact related with the program.
+
+### Plot
+
+By itself this plot looks like there was an impact, but there was not a significant impact based on modeling, and also there was an increase in the United States in vaccinations since late July, perhaps due to news around the Delta variant.
+
+```{r}
+mn_fc_alone <- mn_fc %>%
+  filter(name != "United States")
+
+mn_fc_alone %>%
+  ggplot(aes(x = date, y = value, group = name, color = name)) +
+    geom_point(shape = 1) +
+    geom_smooth(data = mn_fc_alone %>% filter(prog == 1), method = "lm", se = FALSE) +
+    geom_smooth(data = mn_fc_alone %>% filter(prog == 0), method = "lm", se = FALSE) +
+    geom_vline(xintercept = as.Date("2021-07-30")) +
+    theme_fivethirtyeight() +
+    labs(title = "$100 Incentive and Impact on Vaccine Rates",
+         subtitle = "Small and non-statistically significant increase in vaccines", color = "",
+         y = "Daily vaccinations per million",
+         caption = "@rbamattre | Source: Johns Hopkins") +
+    theme(axis.title.y = element_text())
+```
+
+## Confounding variables
+
+Comparing MN to the US would be problematic if the US had certain regions with different trends that made a national trend that was not very comparable. For example, the East Coast has lower trends because more people are vaccinated, and there is increasing vaccines in the South, since less people are vaccination, and the result of these two trends is a generally stable trend. In other words, what is a good comparison to Minnesota?
+
+Consider comparing Minnesota with other states with similar vaccination rates (percent of population vaccinated to date).
+
+### Vaccination rates by region
+
+Compare regions to see if there are different rates. Haven't done this yet.
+
+```{r}
+vacc %>%
+  filter(!is.na(people_fully_vaccinated_per_hundred)) %>%
+  ggplot(aes(x = date, y = people_vaccinated_per_hundred, group = location, 
+             color = location)) +
+    geom_line() +
+    gghighlight(location %in% c("United States", "Minnesota", "Michigan",
+                                "Wisconsin", "New York", "Alabama", "Vermont")) +
+    labs(title = "Vaccinations per Hundred Residents",
+         y = "Vaccinations per Hundred Residents") +
+    scale_y_continuous(labels = scales::comma) +
+    theme_fivethirtyeight()
+
+vacc %>%
+  filter(!is.na(people_fully_vaccinated_per_hundred),
+         date >= '2021-07-01') %>%
+  ggplot(aes(x = date, y = people_vaccinated_per_hundred, group = location, 
+             color = location)) +
+    geom_line() +
+    gghighlight(location %in% c("United States", "Minnesota", "Michigan",
+                                "Wisconsin", "New York", "Alabama", "Vermont")) +
+    labs(title = "Vaccinations per Hundred Residents",
+         y = "Vaccinations per Hundred Residents") +
+    scale_y_continuous(labels = scales::comma) +
+    theme_fivethirtyeight()
+```
 ```
